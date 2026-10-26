@@ -49,14 +49,15 @@ jobs:
           sparse-checkout-cone-mode: false
 
       # Upstream workflows arrive with every merge and expect upstream's runners and
-      # secrets; only tfreecode-* workflows run here.
+      # secrets; only tfreecode-* workflows run here, plus release-desktop.yml, which
+      # tfreecode-release calls and which has no trigger of its own.
       - name: Disable upstream workflows
         if: env.HAS_SYNC_TOKEN == 'true'
         shell: bash
         run: |
           set -euo pipefail
           gh workflow list --repo "$GITHUB_REPOSITORY" --all --json name,path,state \
-            --jq '.[] | select(.state == "active" and (.path | test("/tfreecode-") | not)) | .path' |
+            --jq '.[] | select(.state == "active" and (.path | test("/tfreecode-|/release-desktop\\.yml$") | not)) | .path' |
             while read -r path; do
               echo "disabling $path"
               gh workflow disable "${path##*/}" --repo "$GITHUB_REPOSITORY"
