@@ -13,6 +13,9 @@ raw provider events, or child-agent output. Child-agent token use is excluded fr
 
 T3 Code also sends relay connection traces to Axiom to diagnose T3 Connect connectivity.
 
+Official T3 Code releases send product events by default. Builds from source or from a fork send
+none unless `T3CODE_TELEMETRY_ENABLED=true` is set.
+
 To disable product events and relay tracing, set `T3CODE_TELEMETRY_ENABLED=false` in the server's
 environment before starting it. Relay tracing also stops when `T3CODE_OTEL_SDK_DISABLED` or
 `OTEL_SDK_DISABLED` turns OpenTelemetry export off. The web app in a browser, including one the

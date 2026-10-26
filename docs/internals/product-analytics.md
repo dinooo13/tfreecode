@@ -108,6 +108,7 @@ send prompts, authentication material, raw provider payloads, user-assigned devi
 names, or conversation identifiers. Client metadata is best effort; invalid values
 must not reject a connection. PostHog person profiles remain disabled.
 
-Dev-runner servers and the CI archive smoke test turn telemetry off, which also
-stops relay tracing, because each would count as a new install. Set
-`T3CODE_TELEMETRY_ENABLED=true` to test analytics or relay tracing from a dev server.
+Product events default on only in release builds (`stable`, `nightly`, or `preview`
+telemetry channel), so source and fork builds count no installs. Dev-runner servers
+and the CI archive smoke test also set telemetry off explicitly, which stops relay
+tracing too. Set `T3CODE_TELEMETRY_ENABLED=true` to test either from a dev server.
