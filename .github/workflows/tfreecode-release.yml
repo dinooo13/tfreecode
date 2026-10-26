@@ -1,0 +1,222 @@
+# Publishes a tfreecode release for the upstream stable version the tfreecode branch is
+# based on. The tag is v<upstream version>, because SSH environments and `t3 update`
+# download `.../releases/download/v<version>/t3-<version>-<platform>.tar.gz` from this
+# repository (packages/shared/src/cliRelease.ts). Desktop and CLI builds reuse upstream's
+# release-desktop.yml with no T3 Connect configuration. Signing is optional: add the
+# CSC_* / APPLE_* secrets that release-desktop.yml reads to sign and notarize macOS.
+name: tfreecode release
+
+on:
+  push:
+    branches: [tfreecode]
+  workflow_dispatch:
+    inputs:
+      replace:
+        description: "Rebuild and replace the release if it already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # release-desktop.yml reads this run's artifact list.
+  actions: read
+
+concurrency:
+  group: tfreecode-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLACE: ${{ inputs.replace }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          stable="$(git ls-remote --tags --refs upstream 'v*' | awk '{print $2}' | sed 's|^refs/tags/||' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV)"
+          # shellcheck disable=SC2046 # one refspec per tag
+          git fetch --no-tags upstream $(for t in $stable; do printf '+refs/tags/%s:refs/upstream-tags/%s ' "$t" "$t"; done)
+          base=""
+          for t in $stable; do
+            if git merge-base --is-ancestor "refs/upstream-tags/$t" HEAD; then base="$t"; break; fi
+          done
+          [[ -n "$base" ]] || { echo "HEAD contains no upstream stable tag" >&2; exit 1; }
+          skip=false
+          if gh release view "$base" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && [[ "$REPLACE" != "true" ]]; then
+            echo "Release $base already exists; run manually with 'replace' to rebuild it."
+            skip=true
+          fi
+          {
+            echo "version=${base#v}"
+            echo "ref=$(git rev-parse HEAD)"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+
+  build_bundle:
+    name: Build and verify JS bundle
+    needs: [preflight]
+    if: needs.preflight.outputs.skip == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+          vp i
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+      # Builds the bundle (vp run build:desktop) and fails on telemetry or T3 Connect.
+      - name: Verify
+        run: bash scripts/fork/verify.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop_mac_arm64:
+    name: Desktop macOS arm64
+    needs: [preflight, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: ""
+      clerk_cli_oauth_client_id: ""
+      relay_url: ""
+      label: macOS arm64
+      runner: macos-15
+      platform: mac
+      target: dmg
+      arch: arm64
+      rust_target: aarch64-apple-darwin
+      resource_key: darwin-arm64
+      cli_archive: true
+
+  desktop_linux_x64:
+    name: Desktop Linux x64
+    needs: [preflight, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: ""
+      clerk_cli_oauth_client_id: ""
+      relay_url: ""
+      label: Linux x64
+      runner: ubuntu-24.04
+      platform: linux
+      target: AppImage
+      arch: x64
+      rust_target: x86_64-unknown-linux-gnu
+      resource_key: linux-x64
+      cli_archive: true
+
+  desktop_linux_arm64:
+    name: Desktop Linux arm64
+    needs: [preflight, build_bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: stable
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: ""
+      clerk_cli_oauth_client_id: ""
+      relay_url: ""
+      label: Linux arm64
+      runner: ubuntu-24.04-arm
+      platform: linux
+      target: AppImage
+      arch: arm64
+      rust_target: aarch64-unknown-linux-gnu
+      resource_key: linux-arm64
+      cli_archive: true
+
+  release:
+    name: Publish GitHub release
+    needs: [preflight, desktop_mac_arm64, desktop_linux_x64, desktop_linux_arm64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+      - name: Write CLI archive checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          archives=(t3-*.tar.gz t3-*.zip)
+          [[ ${#archives[@]} -gt 0 ]] || { echo "No CLI archives were produced." >&2; exit 1; }
+          sha256sum "${archives[@]}" > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.preflight.outputs.version }}
+          SHA: ${{ needs.preflight.outputs.ref }}
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          # A fork can inherit upstream's tag of the same name; the release must point at
+          # the tfreecode commit instead.
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" 2>/dev/null || true
+          shopt -s nullglob extglob
+          files=(release-assets/*.dmg release-assets/*.zip release-assets/*.AppImage release-assets/*.deb \
+            release-assets/*.blockmap release-assets/!(builder-debug).yml release-assets/*.tar.gz release-assets/SHA256SUMS)
+          gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target "$SHA" --latest \
+            --title "tfreecode $TAG" \
+            --notes "T3 Code $TAG without telemetry or T3 Connect. Upstream notes: https://github.com/pingdotgg/t3code/releases/tag/$TAG"

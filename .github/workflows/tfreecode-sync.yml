@@ -1,0 +1,220 @@
+# Merges the newest upstream stable tag (vX.Y.Z, no nightly/preview) into the tfreecode
+# branch and opens a PR. Conflicts and failing checks go to Claude Code with
+# FORK_INVARIANTS.md as its brief; scripts/fork/verify.sh decides whether the result is
+# acceptable, and the PR body carries its result plus the full fork delta for review.
+#
+# Needs: secret TFREECODE_SYNC_TOKEN (fine-grained PAT on this repo: Actions, Contents,
+# Pull requests and Workflows read/write; the default token cannot push upstream workflow
+# changes) and secret ANTHROPIC_API_KEY. Without the PAT a run can only find out whether
+# there is anything to sync.
+name: tfreecode sync
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream stable tag to merge (default: newest)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tfreecode-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.TFREECODE_SYNC_TOKEN || github.token }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SYNC_MODEL: ${{ vars.TFREECODE_SYNC_MODEL || 'opus' }}
+      HAS_SYNC_TOKEN: ${{ secrets.TFREECODE_SYNC_TOKEN != '' }}
+    steps:
+      - name: Checkout tfreecode
+        uses: actions/checkout@v6
+        with:
+          ref: tfreecode
+          fetch-depth: 0
+          token: ${{ secrets.TFREECODE_SYNC_TOKEN || github.token }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      # Upstream workflows arrive with every merge and expect upstream's runners and
+      # secrets; only tfreecode-* workflows run here.
+      - name: Disable upstream workflows
+        if: env.HAS_SYNC_TOKEN == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow list --repo "$GITHUB_REPOSITORY" --all --json name,path,state \
+            --jq '.[] | select(.state == "active" and (.path | test("/tfreecode-") | not)) | .path' |
+            while read -r path; do
+              echo "disabling $path"
+              gh workflow disable "${path##*/}" --repo "$GITHUB_REPOSITORY"
+            done
+
+      - name: Resolve upstream stable tags
+        id: tags
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "tfreecode-sync"
+          git config user.email "tfreecode-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          # Upstream tags live under refs/upstream-tags/ so they never collide with
+          # this repository's own release tags of the same name.
+          stable="$(git ls-remote --tags --refs upstream 'v*' | awk '{print $2}' | sed 's|^refs/tags/||' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)"
+          # shellcheck disable=SC2046 # one refspec per tag
+          git fetch --no-tags upstream $(for t in $stable; do printf '+refs/tags/%s:refs/upstream-tags/%s ' "$t" "$t"; done)
+          target="${REQUESTED_TAG:-$(printf '%s\n' "$stable" | tail -n 1)}"
+          if ! printf '%s\n' "$stable" | grep -qx "$target"; then
+            echo "$target is not an upstream stable tag" >&2; exit 1
+          fi
+          current=""
+          for t in $(printf '%s\n' "$stable" | sort -rV); do
+            if git merge-base --is-ancestor "refs/upstream-tags/$t" HEAD; then current="$t"; break; fi
+          done
+          echo "current=$current target=$target"
+          skip=false
+          if [[ "$current" == "$target" ]] || ! git merge-base --is-ancestor "refs/upstream-tags/$current" "refs/upstream-tags/$target"; then
+            echo "Nothing to sync."; skip=true
+          elif git ls-remote --exit-code --heads origin "sync/$target" >/dev/null; then
+            echo "sync/$target already exists; review or delete that PR first."; skip=true
+          fi
+          {
+            echo "current=$current"
+            echo "target=$target"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream tag
+        id: merge
+        if: steps.tags.outputs.skip == 'false'
+        shell: bash
+        env:
+          TARGET: ${{ steps.tags.outputs.target }}
+        run: |
+          set -euo pipefail
+          git switch -c "sync/$TARGET"
+          if git merge --no-ff --no-edit -m "chore(sync): merge upstream $TARGET" "refs/upstream-tags/$TARGET"; then
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U | tee "$RUNNER_TEMP/conflicts.txt"
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Vite+
+        if: steps.tags.outputs.skip == 'false'
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install Claude Code
+        if: steps.tags.outputs.skip == 'false'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Resolve conflicts with Claude Code
+        if: steps.merge.outputs.conflicts == 'true'
+        shell: bash
+        env:
+          TARGET: ${{ steps.tags.outputs.target }}
+        run: |
+          set -euo pipefail
+          claude -p --model "$SYNC_MODEL" --max-turns 150 \
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(vp:*),Bash(node:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(sed:*)" \
+            "You are finishing a merge of upstream T3 Code $TARGET into tfreecode, a minimal fork.
+          Read FORK_INVARIANTS.md first; it is the contract. Conflicted files: $(tr '\n' ' ' < "$RUNNER_TEMP/conflicts.txt").
+          Resolve every conflict by taking upstream's version and then re-applying only what the
+          invariants require, with a 'tfreecode:' comment on each fork change. Never delete upstream
+          code, rename anything, or touch files the invariants do not need. Upstream workflow files:
+          take upstream. Then 'git add' the files and finish with 'git commit --no-edit'. Do not push."
+          if [[ -n "$(git diff --name-only --diff-filter=U)" ]] || [[ -f .git/MERGE_HEAD ]]; then
+            echo "Merge is still unfinished after the agent ran." >&2; exit 1
+          fi
+
+      - name: Install dependencies
+        if: steps.tags.outputs.skip == 'false'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+          vp i
+
+      - name: Verify, with up to two repair passes
+        id: verify
+        if: steps.tags.outputs.skip == 'false'
+        shell: bash
+        env:
+          TARGET: ${{ steps.tags.outputs.target }}
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/verify.log"
+          status=failed
+          for attempt in 1 2 3; do
+            if bash scripts/fork/verify.sh > "$log" 2>&1; then status=passed; break; fi
+            tail -n 80 "$log"
+            [[ "$attempt" == 3 ]] && break
+            claude -p --model "$SYNC_MODEL" --max-turns 150 \
+              --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(vp:*),Bash(node:*),Bash(bash scripts/fork/verify.sh),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(sed:*)" \
+              "tfreecode was just merged with upstream T3 Code $TARGET and scripts/fork/verify.sh fails.
+          Read FORK_INVARIANTS.md (the contract) and the failure below, then fix the cause with the
+          smallest change that restores the invariants, marking fork changes with 'tfreecode:'.
+          If upstream moved the code a patch lived in, re-apply the invariant in the new place and
+          update the file list in scripts/fork/verify.sh. Never weaken a check, delete upstream code
+          or edit tests to hide a failure. Commit with message 'fix(fork): adapt to $TARGET'. Do not push.
+
+          $(tail -n 150 "$log")"
+            vp i > /dev/null
+          done
+          cp "$log" "$RUNNER_TEMP/verify-final.log"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: steps.tags.outputs.skip == 'false'
+        shell: bash
+        env:
+          TARGET: ${{ steps.tags.outputs.target }}
+          CURRENT: ${{ steps.tags.outputs.current }}
+          STATUS: ${{ steps.verify.outputs.status }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          set -euo pipefail
+          git push origin "sync/$TARGET"
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "Merges upstream [$TARGET](https://github.com/pingdotgg/t3code/releases/tag/$TARGET) (from $CURRENT)."
+            echo
+            echo "- Merge conflicts: $CONFLICTS (resolved by Claude Code when true)"
+            echo "- \`scripts/fork/verify.sh\`: **$STATUS**"
+            echo
+            echo "## Fork delta against upstream $TARGET"
+            echo
+            echo "Everything tfreecode changes in upstream files. It should stay this small."
+            echo
+            echo '```diff'
+            git diff "refs/upstream-tags/$TARGET" HEAD -- . ':!FORK_INVARIANTS.md' ':!scripts/fork' ':!.github/workflows/tfreecode-*'
+            echo '```'
+            echo
+            echo "<details><summary>verify.sh output (tail)</summary>"
+            echo
+            echo '```'
+            tail -n 60 "$RUNNER_TEMP/verify-final.log"
+            echo '```'
+            echo "</details>"
+          } > "$body"
+          draft=()
+          [[ "$STATUS" == "passed" ]] || draft=(--draft)
+          gh pr create --repo "$GITHUB_REPOSITORY" --base tfreecode --head "sync/$TARGET" \
+            --title "chore(sync): upstream $TARGET" --body-file "$body" "${draft[@]}"
