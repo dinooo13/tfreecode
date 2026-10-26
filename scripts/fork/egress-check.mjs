@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Starts the server against a throwaway home directory with egress-guard.mjs preloaded,
 // exercises it briefly, and fails if it tried to reach anything outside ALLOWED_HOSTS.
-// Usage: node scripts/fork/egress-check.mjs [server entry] (default: apps/server/src/bin.ts)
+// Usage: node scripts/fork/egress-check.mjs [server entry] (default: apps/server/dist/bin.mjs)
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,7 +19,7 @@ const FORBIDDEN_COMMANDS = [/cloudflared/];
 const RUN_SECONDS = Number(process.env.TFREECODE_EGRESS_SECONDS ?? 45);
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const entry = path.resolve(repoRoot, process.argv[2] ?? "apps/server/src/bin.ts");
+const entry = path.resolve(repoRoot, process.argv[2] ?? "apps/server/dist/bin.mjs");
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "tfreecode-egress-"));
 const logPath = path.join(workDir, "egress.jsonl");
 const homeDir = path.join(workDir, "home");
@@ -58,7 +58,17 @@ for (let i = 0; i < 120 && !exited && !listening; i++) {
   await sleep(1000);
   listening = output.includes(`Listening on ${base}`);
 }
-if (listening) {
+// "Listening" is logged before activation; only an activated server answers / with 200.
+// Requests made during initialization can hang, so each probe has its own deadline.
+let activated = false;
+for (let i = 0; i < 60 && listening && !exited && !activated; i++) {
+  activated = await fetch(base, { signal: AbortSignal.timeout(2000) }).then(
+    (response) => response.status === 200,
+    () => false,
+  );
+  if (!activated) await sleep(1000);
+}
+if (activated) {
   for (const route of ["/", "/api/health", "/.well-known/t3/environment", "/api/auth/session"]) {
     await fetch(`${base}${route}`, { signal: AbortSignal.timeout(5000) }).catch(() => {});
   }
@@ -89,10 +99,12 @@ const summary = [
     ownEvents.map((e) => (e.kind === "spawn" ? `spawn ${e.command}` : `${e.kind} ${e.host}`)),
   ),
 ];
-console.log(`server listening: ${listening}; recorded ${events.length} events in ${workDir}`);
+console.log(
+  `server listening: ${listening}; activated: ${activated}; recorded ${events.length} events in ${workDir}`,
+);
 for (const line of summary) console.log(`  ${line}`);
-if (!listening) {
-  console.error(`server never started listening on ${base}. Output:\n${output.slice(-4000)}`);
+if (!activated) {
+  console.error(`server never answered ${base}/ with 200. Output:\n${output.slice(-4000)}`);
   process.exit(2);
 }
 if (violations.length > 0) {

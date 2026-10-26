@@ -1043,8 +1043,11 @@ const layerMakeServer = Layer.unwrap(
       layerHttpListening,
       layerRuntimeState.pipe(Layer.provide(layerLauncher)),
       layerTailscaleServe,
-      // tfreecode: never revive a T3 Connect link stored by another build.
-      hasCloudPublicConfig ? layerCloudDesiredLinkReconcile : Layer.empty,
+      // tfreecode: never revive a T3 Connect link stored by another build. Activation
+      // still waits for cloudLinkParked, so park with nothing to do.
+      hasCloudPublicConfig
+        ? layerCloudDesiredLinkReconcile
+        : Layer.effectDiscard(Deferred.succeed(cloudLinkParked, undefined)),
       HeapSnapshot.layer,
     );
 
