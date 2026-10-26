@@ -1043,7 +1043,8 @@ const layerMakeServer = Layer.unwrap(
       layerHttpListening,
       layerRuntimeState.pipe(Layer.provide(layerLauncher)),
       layerTailscaleServe,
-      layerCloudDesiredLinkReconcile,
+      // tfreecode: never revive a T3 Connect link stored by another build.
+      hasCloudPublicConfig ? layerCloudDesiredLinkReconcile : Layer.empty,
       HeapSnapshot.layer,
     );
 
