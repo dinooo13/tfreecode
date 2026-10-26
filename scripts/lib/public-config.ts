@@ -103,6 +103,11 @@ export function loadRepoEnv({
   };
 }
 
+/** The repository whose releases a build updates from, as the desktop updater feed reads it. */
+export function resolveReleaseRepository(env: Environment): string {
+  return env.T3CODE_DESKTOP_UPDATE_REPOSITORY?.trim() || env.GITHUB_REPOSITORY?.trim() || "";
+}
+
 export function resolvePublicConfig(...sources: readonly Environment[]): T3CodePublicConfig {
   return {
     clerkPublishableKey: firstNonEmpty(

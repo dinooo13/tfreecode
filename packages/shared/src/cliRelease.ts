@@ -1,4 +1,28 @@
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+declare const __T3CODE_BUILD_RELEASE_REPOSITORY__: string | undefined;
+
+const DEFAULT_CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+const GITHUB_REPOSITORY_SEGMENT = /^[A-Za-z0-9._-]+$/u;
+
+/** The `owner/name` a build publishes its releases under, or upstream when unset or malformed. */
+export function resolveCliReleaseRepository(value: string | undefined): string {
+  const [owner, name, ...extra] = value?.trim().split("/") ?? [];
+  const valid = (segment: string | undefined): segment is string =>
+    segment !== undefined &&
+    segment !== "." &&
+    segment !== ".." &&
+    GITHUB_REPOSITORY_SEGMENT.test(segment);
+  return valid(owner) && valid(name) && extra.length === 0
+    ? `${owner}/${name}`
+    : DEFAULT_CLI_RELEASE_REPOSITORY;
+}
+
+// Builds stamp the repository that publishes them, so a fork's CLI updates and SSH
+// installs come from the fork's releases (same source as the desktop updater feed).
+const CLI_RELEASE_REPOSITORY = resolveCliReleaseRepository(
+  typeof __T3CODE_BUILD_RELEASE_REPOSITORY__ === "undefined"
+    ? undefined
+    : __T3CODE_BUILD_RELEASE_REPOSITORY__,
+);
 export const CLI_RELEASES_PAGE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases`;
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";

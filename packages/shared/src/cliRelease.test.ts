@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { cliArchiveTarCommand, newestCliReleaseVersion, parseChecksums } from "./cliRelease.ts";
+import {
+  cliArchiveTarCommand,
+  newestCliReleaseVersion,
+  parseChecksums,
+  resolveCliReleaseRepository,
+} from "./cliRelease.ts";
 
 describe("cliRelease", () => {
   it("parses sha256sum output including binary-mode markers", () => {
@@ -38,5 +43,12 @@ describe("cliRelease", () => {
     expect(newestCliReleaseVersion(releases, "nightly")).toBe("1.2.4-nightly.20260912.7");
     expect(newestCliReleaseVersion(releases, "stable")).toBe("1.2.3");
     expect(newestCliReleaseVersion([{ tag_name: "v1.2.3" }], "preview")).toBeUndefined();
+  });
+
+  it("downloads from the repository a build was published from, or upstream", () => {
+    expect(resolveCliReleaseRepository(" someone/t3code-fork ")).toBe("someone/t3code-fork");
+    for (const value of [undefined, "", "someone", "someone/fork/extra", "../fork", "a b/c"]) {
+      expect(resolveCliReleaseRepository(value)).toBe("pingdotgg/t3code");
+    }
   });
 });

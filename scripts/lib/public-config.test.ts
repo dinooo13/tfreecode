@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { loadRepoEnv } from "./public-config.ts";
+import { loadRepoEnv, resolveReleaseRepository } from "./public-config.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -58,3 +58,16 @@ function makeTemporaryDirectory() {
   temporaryDirectories.push(directory);
   return directory;
 }
+
+describe("resolveReleaseRepository", () => {
+  it("follows the desktop update repository, then the building GitHub repository", () => {
+    expect(
+      resolveReleaseRepository({
+        T3CODE_DESKTOP_UPDATE_REPOSITORY: "someone/updates",
+        GITHUB_REPOSITORY: "someone/fork",
+      }),
+    ).toBe("someone/updates");
+    expect(resolveReleaseRepository({ GITHUB_REPOSITORY: "someone/fork" })).toBe("someone/fork");
+    expect(resolveReleaseRepository({})).toBe("");
+  });
+});

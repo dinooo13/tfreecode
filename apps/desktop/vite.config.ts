@@ -2,7 +2,7 @@ import "vite-plus/test/config";
 import { defaultInclude, defineConfig } from "vite-plus";
 
 import { isDesktopRuntimeExternalDependency } from "../../scripts/lib/desktop-external-packages.ts";
-import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+import { loadRepoEnv, resolveReleaseRepository } from "../../scripts/lib/public-config.ts";
 
 const repoEnv = loadRepoEnv();
 
@@ -14,6 +14,7 @@ const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
+  __T3CODE_BUILD_RELEASE_REPOSITORY__: JSON.stringify(resolveReleaseRepository(repoEnv)),
 };
 
 export default defineConfig({
